@@ -275,6 +275,14 @@ static int l4s_prague_link_test(uint64_t latency, uint64_t min_th, uint64_t max_
     return ret;
 }
 
+/* A 1 ms marking step at 20 ms RTT. Pacing bursts longer than the step get
+ * marked even when there is no standing queue.
+ */
+int l4s_prague_shallow_test(void)
+{
+    return l4s_prague_link_test(10000, 1000, 1000, 50000000, 5500000);
+}
+
 /* The RFC 9332 ramp from 3 to 6 ms at 40 ms RTT. The window must not be
  * reduced a second time for the slow start overshoot, since recovering by
  * one packet per RTT takes seconds at that RTT.
