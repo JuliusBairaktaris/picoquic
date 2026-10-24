@@ -170,6 +170,7 @@ typedef struct st_picoquic_prague_state_t {
     uint64_t l4s_epoch_ce;
     uint64_t l4s_packet_ect1;
     uint64_t l4s_packet_ce;
+    int is_reduced_this_era;
 
     picoquic_min_max_rtt_t rtt_filter;
 } picoquic_prague_state_t;
@@ -183,6 +184,7 @@ static void picoquic_prague_init_reno(picoquic_prague_state_t* pr_state, picoqui
     pr_state->alg_state = picoquic_prague_alg_slow_start;
     pr_state->ssthresh = UINT64_MAX;
     pr_state->alpha = 0;
+    pr_state->is_reduced_this_era = 0;
     path_x->cwin = PICOQUIC_CWIN_INITIAL;
 }
 
@@ -268,6 +270,9 @@ static void picoquic_prague_enter_recovery(
     pr_state->alg_state = picoquic_prague_alg_congestion_avoidance;
 
     picoquic_prague_initialize_era(cnx, path_x, pr_state, current_time);
+    /* The packets acknowledged in this era were sent before the reduction,
+     * and their CE marks belong to the congestion event just handled. */
+    pr_state->is_reduced_this_era = 1;
 }
 
 static void picoquic_prague_update_alpha(picoquic_path_t* path_x, picoquic_prague_state_t* pr_state,
@@ -334,7 +339,7 @@ void picoquic_prague_process_ack(picoquic_cnx_t* cnx,
              * Alpha decays slowly, by 1/16th per period. Reducing the window on
              * every period for which alpha is not zero would keep shrinking it
              * for many round trips after the congestion is gone. */
-            if (delta_ce > 0) {
+            if (delta_ce > 0 && !pr_state->is_reduced_this_era) {
                 /* Update the ssthresh and the CWIN */
                 uint64_t delta_cwin = (path_x->cwin * pr_state->alpha) / 2048;
                 path_x->cwin -= delta_cwin;
@@ -346,6 +351,7 @@ void picoquic_prague_process_ack(picoquic_cnx_t* cnx,
         }
         /* reset the era limits */
         picoquic_prague_initialize_era(cnx, path_x, pr_state, current_time);
+        pr_state->is_reduced_this_era = 0;
     }
     /* Increment CWND whether in recovery or not */
     if (pkt_ctx->ecn_ect1_total_remote >= pr_state->l4s_packet_ect1 &&

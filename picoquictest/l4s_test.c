@@ -207,3 +207,79 @@ int l4s_bbr_updown_test(void)
     return ret;
 #endif
 }
+
+/* One Prague flow sends data_size bytes over a 100 Mbps link, whose L4S queue
+ * marks CE with a probability rising from 0 at min_th to 1 at max_th of
+ * sojourn time, a step if both are equal. The flow should use most of the
+ * link without building a queue beyond max_th.
+ */
+static int l4s_prague_link_test(uint64_t latency, uint64_t min_th, uint64_t max_th, size_t data_size,
+    uint64_t max_completion_time)
+{
+    picoquic_congestion_algorithm_t* ccalgo = picoquic_prague_algorithm;
+    uint64_t simulated_time = 0;
+    uint64_t picosec_per_byte = (1000000ull * 8) / 100;
+    uint64_t queue_delay_max = 2 * latency + 100000;
+    picoquic_connection_id_t initial_cid = { {0x45, 0xcc, 0x9a, 0, 0, 0, 0, 0}, 8 };
+    picoquic_test_tls_api_ctx_t* test_ctx = NULL;
+    int ret;
+
+    initial_cid.id[3] = (uint8_t)(latency / 1000);
+    initial_cid.id[4] = (uint8_t)(min_th / 100);
+    initial_cid.id[5] = (uint8_t)(max_th / 100);
+
+    ret = tls_api_one_scenario_init_ex(&test_ctx, &simulated_time, PICOQUIC_INTERNAL_TEST_VERSION_1, NULL, NULL, &initial_cid);
+
+    if (ret == 0 && test_ctx == NULL) {
+        ret = -1;
+    }
+
+    if (ret == 0) {
+        picoquic_set_default_congestion_algorithm(test_ctx->qclient, ccalgo);
+        picoquic_set_default_congestion_algorithm(test_ctx->qserver, ccalgo);
+        picoquic_set_congestion_algorithm(test_ctx->cnx_client, ccalgo);
+        test_ctx->ecn_support = 1;
+        test_ctx->packet_ecn_default = PICOQUIC_ECN_ECT_1;
+        test_ctx->c_to_s_link->microsec_latency = latency;
+        test_ctx->c_to_s_link->picosec_per_byte = picosec_per_byte;
+        test_ctx->c_to_s_link->queue_delay_max = queue_delay_max;
+        test_ctx->s_to_c_link->microsec_latency = latency;
+        test_ctx->s_to_c_link->picosec_per_byte = picosec_per_byte;
+        test_ctx->stream0_flow_release = 1;
+        test_ctx->immediate_exit = 1;
+
+        if ((ret = dualq_configure(test_ctx->c_to_s_link, max_th)) == 0) {
+            dualq_state_t* dqs = (dualq_state_t*)test_ctx->c_to_s_link->aqm_state;
+
+            dqs->minTh = min_th;
+            dqs->maxTh = max_th;
+            dqs->range = max_th - min_th;
+        }
+    }
+
+    if (ret == 0) {
+        ret = tls_api_one_scenario_body(test_ctx, &simulated_time, NULL, 0, data_size, 0, 0,
+            queue_delay_max, max_completion_time);
+    }
+
+    if (ret == 0 && test_ctx->cnx_client->path[0]->smoothed_rtt > 2 * latency + max_th) {
+        DBG_PRINTF("Smoothed RTT %" PRIu64 ", expected at most %" PRIu64,
+            test_ctx->cnx_client->path[0]->smoothed_rtt, 2 * latency + max_th);
+        ret = -1;
+    }
+
+    if (test_ctx != NULL) {
+        tls_api_delete_ctx(test_ctx);
+    }
+
+    return ret;
+}
+
+/* The RFC 9332 ramp from 3 to 6 ms at 40 ms RTT. The window must not be
+ * reduced a second time for the slow start overshoot, since recovering by
+ * one packet per RTT takes seconds at that RTT.
+ */
+int l4s_prague_long_rtt_test(void)
+{
+    return l4s_prague_link_test(20000, 3000, 6000, 50000000, 5000000);
+}
